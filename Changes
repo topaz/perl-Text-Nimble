@@ -1,0 +1,5 @@
+Revision history for Text-Nimble
+
+0.001   2014-02-02
+        Initial version of Text::Nimble, including support for HTML rendering
+        and a simple macro system.
