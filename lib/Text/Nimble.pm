@@ -17,10 +17,10 @@ my %renderer = (
 
 sub render {
   my ($format, $nimble) = @_;
-  croak "Text::Nimble::render takes two arguments by got ".(scalar @_) unless @_ == 2;
-  croak "Text::Nimble::render takes a format name as its first argument" unless defined $_[0] && $_[0] =~ /^\w+$/;
+  croak "Text::Nimble::render takes two arguments but got ".(scalar @_) unless @_ == 2;
+  croak "Text::Nimble::render takes a render format name as its first argument" unless defined $_[0] && $_[0] =~ /^\w+$/;
   croak "Text::Nimble::render takes Nimble text or a Nimble parse result as its second argument" unless defined $_[1] && (!ref $_[1] || ref $_[1] eq 'ARRAY' || (ref $_[1] eq 'HASH' && $_[1]{tree} && $_[1]{macro}));
-  croak "Text::Nimble::render was given unknown render format '$_[0]'" unless $renderer{$format};
+  croak "Text::Nimble::render was given an unknown render format '$_[0]'" unless $renderer{$format};
 
   $nimble = parse($nimble) unless ref $nimble eq 'HASH';
   my $output = $renderer{$format}($nimble);
