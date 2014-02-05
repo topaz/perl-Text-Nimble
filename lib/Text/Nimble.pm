@@ -6,7 +6,7 @@ use warnings FATAL => 'all';
 
 use Carp;
 
-our $VERSION = '0.001000';
+our $VERSION = '0.002000';
 $VERSION = eval $VERSION;
 
 
@@ -24,13 +24,13 @@ sub render {
 
   $nimble = parse($nimble) unless ref $nimble eq 'HASH';
   my $output = $renderer{$format}($nimble);
-  return wantarray ? ($output, $nimble->{meta}) : $output;
+  return wantarray ? ($output, $nimble->{meta}, $nimble->{error}) : $output;
 }
 
 sub parse {
   croak "Text::Nimble::parse takes one argument but got ".(scalar @_) unless @_ == 1;
 
-  my (%meta, %macro);
+  my (%meta, %macro, @error);
 
   local *_nimble_makelines = sub {
     # break input into lines
@@ -59,7 +59,7 @@ sub parse {
     } elsif ($type eq 'raw') {
       return ref $arg ? join("\n", @$arg) : $arg;
     } else {
-      croak "unreachable: _macro_arg_preprocess tried to decode a macro argument with unrecognized type '$type'";
+      die "unreachable: _macro_arg_preprocess tried to decode a macro argument with unrecognized type '$type'";
     }
   };
 
@@ -147,17 +147,30 @@ sub parse {
       } elsif (defined $bracketcontents) {
         if ($bracketcontents =~ /^\$(\w+)((?:\s+\w+\=(?:\S*|([\"\'])((?:(?!\\|\g{-2}).|\\.)*)\g{-2}))*)\s*$/) {
           my ($macro_name, $macro_args) = ($1, $2);
-          croak "during _nimble_parse_inline, tried to use an unknown macro '$macro_name'" unless $macro{$macro_name};
-          my $node = {type=>"macro", macro=>$macro_name, args=>{}};
-          while ($macro_args =~ /\G\s+(\w+)\=(?:(?![\"\'])(\S*)|([\"\'])((?:(?!\\|\g{-2}).|\\.)*)\g{-2})/g) {
-            my ($arg_name, $arg_value) = ($1, $2 // $4);
-            croak "during _nimble_parse_inline, tried to pass a duplicate argument '$arg_name' for macro '$macro_name'" if $node->{args}{$arg_name};
-            croak "during _nimble_parse_inline, tried to pass an unknown argument '$arg_name' for macro '$macro_name'" unless $macro{$macro_name}{args}{$arg_name};
-            $arg_value =~ s/^\[|\]$//g if $arg_value =~ /^(\[(?:(?:(?-1)*?)|[^\[\]\\]+|\\.|.)*?\])$/;
-            $arg_value =~ s/\\(.)/$1/g;
-            $node->{args}{$arg_name} = $arg_value;
+          my ($node, @errors);
+
+          push @errors, "no macro by that name is defined" unless $macro{$macro_name};
+
+          if (!@errors) {
+            $node = {type=>"macro", macro=>$macro_name, args=>{}};
+            while ($macro_args =~ /\G\s+(\w+)\=(?:(?![\"\'])(\S*)|([\"\'])((?:(?!\\|\g{-2}).|\\.)*)\g{-2})/g) {
+              my ($arg_name, $arg_value) = ($1, $2 // $4);
+              push @errors, "duplicate argument '$arg_name'" if $node->{args}{$arg_name};
+              push @errors, "unknown argument '$arg_name'" unless $macro{$macro_name}{args}{$arg_name};
+              next if @errors; #skip work if any errors have been seen, but keep parsing to find more errors
+              $arg_value =~ s/^\[|\]$//g if $arg_value =~ /^(\[(?:(?:(?-1)*?)|[^\[\]\\]+|\\.|.)*?\])$/;
+              $arg_value =~ s/\\(.)/$1/g;
+              $node->{args}{$arg_name} = $arg_value;
+            }
+            if (!@errors) {
+              _macro_invocation_preprocess($macro_name, $node);
+            }
           }
-          _macro_invocation_preprocess($macro_name, $node);
+
+          if (@errors) {
+            $node = {type=>"error", context=>"building inline macro '$macro_name' invocation", errors=>\@errors};
+            push @error, $node;
+          }
           push @output, $node;
         } elsif ($bracketcontents =~ /^raw\s+(\w+)\s+(.+?)\s*$/) {
           my ($format, $content) = ($1, $2);
@@ -182,7 +195,7 @@ sub parse {
       } elsif (defined $char) {
         $append_text->($char);
       } else {
-        croak "unreachable: _nimble_parse_inline matched an inline pattern but failed to determine which rule should handle it: " . substr($text, $-[0], $+[0] - $-[0]) . "\n";
+        die "unreachable: _nimble_parse_inline matched an inline pattern but failed to determine which rule should handle it: " . substr($text, $-[0], $+[0] - $-[0]) . "\n";
       }
     }
 
@@ -372,9 +385,12 @@ sub parse {
         push @output, $node;
       # macro definition
       } elsif (my ($macro_decl) = $lines[$i] =~ /^\#macro\s+(\w+)\s*$/) {
-        croak "on _nimble_parse input line $i, tried to define a duplicate macro '$macro_decl'" if $macro{$macro_decl};
         my $macro = {args=>{}, results=>{}};
         $i++;
+
+        my @errors;
+        push @errors, "a macro named '$macro_decl' already exists" if $macro{$macro_decl};
+        # we're building $macro as a temp variable, so no need to skip altering logic based on @errors
 
         my ($block_type, $block_name, $block_value, $block_indent, $block_internal_indent);
         for (; $i<@lines; $i++) {
@@ -386,8 +402,8 @@ sub parse {
             $block_line =~ s/^$block_internal_indent//;
             push @{$macro->{$block_type}{$block_name}{$block_value}}, $block_line;
           } elsif (my ($arg_indent, $arg_name, $arg_type, $arg_inline_default) = $lines[$i] =~ /^( +)\#arg\s+(\w+)\s+(\w+)(?:\s+(\S.*?))?\s*$/) {
-            croak "on _nimble_parse input line $i, tried to define a duplicate argument '$arg_name' for macro '$macro_decl'" if $macro->{args}{$arg_name};
-            croak "on _nimble_parse input line $i, tried to define an argument '$arg_name' with invalid type '$arg_type' for macro '$macro_decl'" unless $arg_type =~ /^(?:nimble|raw)$/;
+            push @errors, "duplicate definition for argument '$arg_name'" if $macro->{args}{$arg_name};
+            push @errors, "invalid type '$arg_type' for argument '$arg_name'" unless $arg_type =~ /^(?:nimble|raw)$/;
             $macro->{args}{$arg_name} = {type=>$arg_type, default=>[]};
             if (defined $arg_inline_default) {
               $macro->{args}{$arg_name}{default} = $arg_inline_default;
@@ -396,7 +412,7 @@ sub parse {
               ($block_type, $block_name, $block_value, $block_indent, $block_internal_indent) = ("args", $arg_name, "default", $arg_indent, undef);
             }
           } elsif (my ($result_indent, $result_format, $result_inline_default) = $lines[$i] =~ /^( +)\#result\s+(\w+)(?:\s+(\S.*?))?\s*$/) {
-            croak "on _nimble_parse input line $i, tried to define a duplicate '$result_format'-format result for macro '$macro_decl'" if $macro->{results}{$result_format};
+            push @errors, "duplicate definition of '$result_format'-format result" if $macro->{results}{$result_format};
             $macro->{results}{$result_format} = {output=>[]};
             if (defined $result_inline_default) {
               $macro->{results}{$result_format}{output} = $result_inline_default;
@@ -409,19 +425,27 @@ sub parse {
           }
         }
 
-        foreach my $arg_name (keys %{$macro->{args}}) {
-          $macro->{args}{$arg_name}{default} = _macro_arg_preprocess($macro->{args}{$arg_name}{type}, $macro->{args}{$arg_name}{default});
-        }
-        foreach my $result_format (keys %{$macro->{results}}) {
-          $macro->{results}{$result_format}{output} = join("\n", @{$macro->{results}{$result_format}{output}}) if ref $macro->{results}{$result_format}{output};
-        }
+        if (!@errors) {
+          foreach my $arg_name (keys %{$macro->{args}}) {
+            $macro->{args}{$arg_name}{default} = _macro_arg_preprocess($macro->{args}{$arg_name}{type}, $macro->{args}{$arg_name}{default});
+          }
+          foreach my $result_format (keys %{$macro->{results}}) {
+            $macro->{results}{$result_format}{output} = join("\n", @{$macro->{results}{$result_format}{output}}) if ref $macro->{results}{$result_format}{output};
+          }
 
-        $macro{$macro_decl} = $macro;
+          $macro{$macro_decl} = $macro;
+        } else {
+          my $node = {type=>"error", context=>"defining macro '$macro_decl'", errors=>\@errors};
+          push @error, $node;
+          push @output, $node;
+        }
       # macro usage
       } elsif (my ($macro_name) = $lines[$i] =~ /^\$\s*(\w+)\s*$/) {
-        croak "on _nimble_parse input line $i, tried to use an unknown macro '$macro_name'" unless $macro{$macro_name};
         my $node = {type=>"macro", macro=>$macro_name, args=>{}};
         $i++;
+
+        my @errors;
+        push @errors, "no macro by that name is defined" unless $macro{$macro_name};
 
         my ($block_indent, $arg_block_name, $block_internal_indent);
         for (; $i<@lines; $i++) {
@@ -431,13 +455,19 @@ sub parse {
               $block_internal_indent = $1;
             }
             $block_line =~ s/^$block_internal_indent//;
-            push @{$node->{args}{$arg_block_name}}, $block_line;
+            if (!@errors) {
+              push @{$node->{args}{$arg_block_name}}, $block_line;
+            }
           } elsif (my ($arg_indent, $arg_name, $arg_inline_default) = $lines[$i] =~ /^( +)(\w+)\:(?:\s+(\S.*?))?\s*$/) {
-            croak "on _nimble_parse input line $i, tried to pass a duplicate argument '$arg_name' for macro '$macro_name'" if $node->{args}{$arg_name};
-            croak "on _nimble_parse input line $i, tried to pass an unknown argument '$arg_name' for macro '$macro_name'" unless $macro{$macro_name}{args}{$arg_name};
-            $node->{args}{$arg_name} = [];
+            push @errors, "duplicate argument '$arg_name'" if $node->{args}{$arg_name};
+            push @errors, "unknown argument '$arg_name'" unless $macro{$macro_name}{args}{$arg_name};
+            if (!@errors) {
+              $node->{args}{$arg_name} = [];
+            }
             if (defined $arg_inline_default) {
-              $node->{args}{$arg_name} = $arg_inline_default;
+              if (!@errors) {
+                $node->{args}{$arg_name} = $arg_inline_default;
+              }
               $arg_block_name = undef;
             } else {
               ($arg_block_name, $block_indent, $block_internal_indent) = ($arg_name, $arg_indent, undef);
@@ -447,8 +477,14 @@ sub parse {
           }
         }
 
-        _macro_invocation_preprocess($macro_name, $node);
+        if (!@errors) {
+          _macro_invocation_preprocess($macro_name, $node);
+        }
 
+        if (@errors) {
+          $node = {type=>"error", context=>"building block macro '$macro_name' invocation", errors=>\@errors};
+          push @error, $node;
+        }
         push @output, $node;
       # space
       } elsif ($lines[$i] =~ /^\s*$/) {
@@ -459,7 +495,12 @@ sub parse {
         $i++;
         if (defined $section_end) {
           my $section_end_num = length($section_end);
-          croak "on _nimble_parse input line $i, tried to end a section which wasn't open" if $section_end_num > $section_depth;
+          if ($section_end_num > $section_depth) {
+            my $node = {type=>"error", context=>"processing section end makers", errors=>["tried to end a section which wasn't open"]};
+            push @error, $node;
+            push @output, $node;
+            $section_end_num = $section_depth;
+          }
           push @output, {type=>"section_end"} for 1..$section_end_num;
           $section_depth -= $section_end_num;
         }
@@ -507,7 +548,7 @@ sub parse {
   do {
     my $lines = _nimble_makelines($_[0]);
     my $tree = _nimble_parse($lines);
-    return {tree=>$tree, meta=>\%meta, macro=>\%macro};
+    return {tree=>$tree, meta=>\%meta, macro=>\%macro, (@error ? (error=>\@error) : ())};
   };
 }
 
@@ -545,7 +586,7 @@ sub _renderer_html {
     my ($macro, $arg_name, $filters) = @_;
     my @filters = defined $filters ? split(/\|/, $filters) : ();
     my @unknown_filters = grep {!$macro_filters{$_}} @filters;
-    croak "Text::Nimble::_renderer_html tried to use unknown macro argument filter(s): " . join(", ", @unknown_filters) if @unknown_filters;
+    return "[nimble macro error: unknown argument filters(s): " . join(", ", @unknown_filters) . "]" if @unknown_filters;
     my $value = $macro->{args}{$arg_name};
     $value = $macro_filters{$_}($value) for @filters;
     return $value;
@@ -585,6 +626,7 @@ sub _renderer_html {
     elsif ($type eq 'entity'     ) { return $node->{html} }
     elsif ($type eq 'ul'         ) { return "<ul>".join("", map{"<li>"._render_html($_)."</li>"} @{$node->{list}})."</ul\n>" }
     elsif ($type eq 'raw'        ) { return $node->{format} eq 'html' ? $node->{content} : '' }
+    elsif ($type eq 'error'      ) { return "<span class=\"nimble-error\">Nimble error while "._xmlenc($node->{context}).": ".join("; ", map{_xmlenc($_)} @{$node->{errors}})."</span\n>" }
     elsif ($type eq 'blockquote' ) {
       my $bq_html = "<blockquote>"._render_html($node->{quote})."</blockquote\n>";
       $bq_html = "<figure class=\"quote\">$bq_html<figcaption>"._render_html($node->{cite})."</figcaption></figure\n>" if $node->{cite};
@@ -648,7 +690,7 @@ Text::Nimble - Parse and render Nimble markup.
     my ($html, $meta) = Text::Nimble::render(html => $nimble);
 
     # or, parse and render in separate steps
-    my $parsetree = Text::Nimble::parse($nimble);
+    my $parsetree     = Text::Nimble::parse($nimble);
     my ($html, $meta) = Text::Nimble::render(html => $parsetree);
 
 =head1 DESCRIPTION
@@ -656,25 +698,58 @@ Text::Nimble - Parse and render Nimble markup.
 This module provides a function-oriented interface for parsing and rendering
 Nimble markup.
 
+For details on Nimble syntax and the project in general, see
+L<http://was.tl/projects/nimble/>.
+
 =head1 FUNCTIONS
+
+In case of error, these functions try to C<croak> when used improperly (such as
+being invoked with invalid parameters) and C<die> when something which was
+expected to be impossible happens (a bug, like the parser producing a token it
+doesn't know how to handle).  Syntax errors do not C<die> or even C<warn>, but
+instead are left in the parse tree as special nodes of type C<error>; these
+nodes are collected and L<returned by C<parse()>|/error> or included in the output
+produced by C<render()>.
 
 =over
 
 =item C<Text::Nimble::parse(I<$markup>)>
 
 Converts Nimble text into a parse tree.  Takes a scalar containing an entire
-Nimble document. Returns a reference to a hash with keys C<tree> (the parse tree
-representing the renderable parts of the document), C<meta> (a reference to a
-hash containing the document's metadata), and C<macro> (a reference to a
-hash which defined the macros declared in the document).
+Nimble document. Returns a reference to a hash with these entries:
+
+=over
+
+=item C<tree>
+
+The parse tree representing the renderable parts of the document.
+
+=item C<meta>
+
+A reference to a hash containing the document's metadata.
+
+=item C<macro>
+
+A reference to a hash which defined the macros declared in the document.
+
+=item C<error>
+
+Omitted if there were no errors; otherwise, a reference to an array of
+references to error nodes within the parsetree.  Each error node is a hash
+containing a C<type> (always C<"error">), a C<context> (a string describing
+what was going on when the error occurred), and C<errors>, a reference to an
+array of error message strings.
+
+=back
 
 =item C<Text::Nimble::render(I<$format>, I<$input>)>
 
 Renders some input (either a parse tree from C<Text::Nimble::parse> or a scalar
 containing an entire Nimble document) given some render format.  In scalar
 context, returns a string containing the rendered data.  In list context,
-returns a string containing the rendered data and a reference to a hash of the
-document's metadata.
+returns a string containing the rendered data, a reference to a hash of the
+document's metadata, and either undef (if there were no errors) or a reference
+to an array of errors copied from L<the result of C<parse()>|/error>.
 
 =back
 
