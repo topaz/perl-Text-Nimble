@@ -6,7 +6,7 @@ use warnings FATAL => 'all';
 
 use Carp;
 
-our $VERSION = '0.002000';
+our $VERSION = '0.002001';
 $VERSION = eval $VERSION;
 
 
@@ -684,14 +684,14 @@ Text::Nimble - Parse and render Nimble markup.
     END
 
     # just get html
-    my  $html         = Text::Nimble::render(html => $nimble);
+    my  $html                  = Text::Nimble::render(html => $nimble);
 
-    # or, get html and metadata
-    my ($html, $meta) = Text::Nimble::render(html => $nimble);
+    # or, get html, metadata, errors
+    my ($html, $meta, $errors) = Text::Nimble::render(html => $nimble);
 
     # or, parse and render in separate steps
-    my $parsetree     = Text::Nimble::parse($nimble);
-    my ($html, $meta) = Text::Nimble::render(html => $parsetree);
+    my $parsetree              = Text::Nimble::parse($nimble);
+    my ($html, $meta, $errors) = Text::Nimble::render(html => $parsetree);
 
 =head1 DESCRIPTION
 
